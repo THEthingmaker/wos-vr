@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WoS Controller Bridge - cdless</title>
+    <style>
+        body { font-family: monospace; background: #0a0a0a; color: #0f0; padding: 20px; }
+        button { background: #0f0; color: #000; font-size: 24px; padding: 10px 20px; border: none; cursor: pointer; font-weight: bold; }
+        #status { background: #1a1a1a; padding: 15px; margin-top: 20px; border-radius: 8px; white-space: pre-wrap; font-size: 12px; }
+        .data { color: #ff0; }
+    </style>
+</head>
+<body>
+    <h1>🎮 Waste of Space Controller Bridge</h1>
+    <button id="enterVR">Enter VR Mode</button>
+    <div id="status">Ready — click Enter VR Mode</div>
+
+    <script>
+        // YOUR CDLESS FUNCTION URL
+        const API_URL = 'https://cdless.com/@your-username/wos-controller-bridge@latest';
+        
+        const CAPTURE_INTERVAL = 100;   // 0.1 seconds (10Hz)
+        const SEND_INTERVAL = 500;      // 0.5 seconds
+        
+        let xrSession = null;
+        let poseBuffer = [];
+        let frameCount = 0;
+        let sendCount = 0;
+        
+        const statusDiv = document.getElementById('status');
+        
+        function log(msg, isError = false) {
+            const time = new Date().toLocaleTimeString();
+            const prefix = `[${time}] `;
+            statusDiv.innerHTML = `<span style="color: ${isError ? '#f66' : '#0f0'}">${prefix}</span>${msg}<br>` + statusDiv.innerHTML;
+            if (statusDiv.innerHTML.split('<br>').length > 30) {
+                statusDiv.innerHTML = statusDiv.innerHTML.split('<br>').slice(0, 30).join('<br>');
+            }
+        }
+        
+        async function sendBatch() {
+            if (poseBuffer.length === 0) return;
+            
+            const batch = [...poseBuffer];
+            poseBuffer = [];
+            
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ method: 'POST', body: batch })
+                });
+                
+                sendCount++;
+                const result = await response.json();
+                log(`📤 Sent batch: ${batch.length} poses (total sends: ${sendCount})`);
+                
+            } catch (err) {
+                log(`❌ Send failed: ${err.message}`, true);
+                // Optionally re-add to buffer? Probably not — just log
+            }
+        }
+        
+        // Send every 0.5 seconds
+        setInterval(sendBatch, SEND_INTERVAL);
+        
+        document.getElementById('enterVR').onclick = async () => {
+            if (!navigator.xr) {
+                log('❌ WebXR not supported on this browser', true);
+                return;
+            }
+            
+            try {
+                xrSession = await navigator.xr.requestSession('immersive-vr', {
+                    requiredFeatures: ['local']
+                });
+                
+                log('✅ VR Session Active — capturing at 10Hz, sending every 0.5s');
+                
+                let lastCapture = 0;
+                
+                function onXRFrame(time, frame) {
+                    const session = frame.session;
+                    const baseSpace = session.renderState.baseLayer?.referenceSpace;
+                    const pose = frame.getViewerPose(baseSpace);
+                    
+                    if (time - lastCapture >= CAPTURE_INTERVAL) {
+                        lastCapture = time;
+                        
+                        if (pose && session.inputSources) {
+                            const controllers = {
+                                timestamp: time,
+                                leftController: null,
+                                rightController: null
+                            };
+                            
+                            for (const inputSource of session.inputSources) {
+                                const targetRayPose = frame.getPose(inputSource.targetRaySpace, baseSpace);
+                                
+                                if (targetRayPose) {
+                                    const data = {
+                                        handedness: inputSource.handedness,
+                                        position: {
+                                            x: targetRayPose.transform.position.x,
+                                            y: targetRayPose.transform.position.y,
+                                            z: targetRayPose.transform.position.z
+                                        },
+                                        rotation: {
+                                            x: targetRayPose.transform.orientation.x,
+                                            y: targetRayPose.transform.orientation.y,
+                                            z: targetRayPose.transform.orientation.z,
+                                            w: targetRayPose.transform.orientation.w
+                                        }
+                                    };
+                                    
+                                    if (inputSource.handedness === 'left') {
+                                        controllers.leftController = data;
+                                    } else if (inputSource.handedness === 'right') {
+                                        controllers.rightController = data;
+                                    }
+                                }
+                            }
+                            
+                            poseBuffer.push(controllers);
+                            frameCount++;
+                            
+                            if (frameCount % 10 === 0) {
+                                const l = controllers.leftController?.position;
+                                const r = controllers.rightController?.position;
+                                log(`🎯 Frame ${frameCount} | L: ${l ? `${l.x.toFixed(2)},${l.y.toFixed(2)}` : 'none'} | R: ${r ? `${r.x.toFixed(2)},${r.y.toFixed(2)}` : 'none'} | Buffer: ${poseBuffer.length}`, false);
+                            }
+                        }
+                    }
+                    
+                    session.requestAnimationFrame(onXRFrame);
+                }
+                
+                xrSession.requestAnimationFrame(onXRFrame);
+                
+                xrSession.addEventListener('end', () => {
+                    log('⏹️ VR Session ended');
+                    xrSession = null;
+                });
+                
+            } catch (err) {
+                log(`❌ Failed to start VR: ${err.message}`, true);
+            }
+        };
+    </script>
+</body>
+</html>
